@@ -1,0 +1,40 @@
+source:
+  host: "localhost"
+  port: 5432
+  database: "source_db"
+  username: "postgres"
+  password: "123"
+
+target:
+  host: "localhost"
+  port: 5432
+  database: "target_db"
+  username: "postgres"
+  password: "123"
+
+migration:
+  threads: 4
+  schemas:
+    mode: "include"
+    list:
+      - "public"
+      - "app_schema"
+
+  tables:
+    mode: "include"
+    list:
+      - table: "users"
+        where: "created_at > '2024-01-01'"
+        limit: 10000
+      - table: "orders"
+        where: "status = 'completed'"
+        order_by: "created_at DESC"
+      - table: "products"
+
+  roles:
+    mode: "exclude"
+    list:
+      - "admin_role"
+
+  indexes_after_data: true
+  constraints_after_data: true
