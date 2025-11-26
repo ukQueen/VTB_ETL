@@ -1,0 +1,2 @@
+vtb_etl_dumb.sql filter=lfs diff=lfs merge=lfs -text
+vtb_etl_dump.sql filter=lfs diff=lfs merge=lfs -text
