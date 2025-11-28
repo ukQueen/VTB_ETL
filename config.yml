@@ -1,0 +1,24 @@
+source:
+  host: "host.docker.internal"
+  port: 5432
+  database: "vtb_etl"
+  username: "postgres"
+  password: "Xup5xona"
+
+target:
+  host: "host.docker.internal"
+  port: 5432
+  database: "vtb_etl_2"
+  username: "postgres"
+  password: "Xup5xona"
+
+migration:
+  threads: 4
+  tables:
+    - name: "universities"
+      where: "university_id < 3"
+      limit: 10
+    - name: "faculties"
+      limit: 50
+    - name: "departments"
+      where: "department_id = 10"
