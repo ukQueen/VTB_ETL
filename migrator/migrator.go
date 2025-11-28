@@ -494,7 +494,7 @@ func printConfig(config *Config, logger *Logger) {
 		for i, role := range config.Roles.List {
 			logger.logInfo(fmt.Sprintf("  %d. %s", i+1, role.Name))
 			for j, privilege := range role.TablePrivileges {
-				logger.logInfo(fmt.Sprintf("     表 %d: %s - права: %v", j+1, privilege.Table, privilege.Permissions))
+				logger.logInfo(fmt.Sprintf(" 	 %d: %s - права: %v", j+1, privilege.Table, privilege.Permissions))
 			}
 		}
 	} else {

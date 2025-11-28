@@ -26,112 +26,115 @@ main() {
 
     echo "[DEBUG] Начинаем парсинг таблиц..."
 
-    # Таблицы - grep + ручная сборка JSON
-    TABLES=$(grep -A 10 "tables:" "$CONFIG_FILE" | grep -E "name:|where:|limit:" | sed 's/^[ ]*//')
+    # Таблицы - только из секции tables, игнорируем другие секции
     MIGRATION_CONFIG_JSON="["
-    current_table=""
+    first_table=true
+
+    # Ищем секцию tables и берем только имена таблиц из нее
+    in_tables_section=false
     while IFS= read -r line; do
-        if [[ "$line" =~ name:\ \"(.*)\" ]]; then
-            if [[ -n "$current_table" ]]; then
-                MIGRATION_CONFIG_JSON+="},"
-            fi
-            current_table="${BASH_REMATCH[1]}"
-            MIGRATION_CONFIG_JSON+="{\"table\":\"$current_table\""
-        elif [[ "$line" =~ where:\ \"(.*)\" ]]; then
-            MIGRATION_CONFIG_JSON+=",\"where\":\"${BASH_REMATCH[1]}\""
-        elif [[ "$line" =~ limit:\ ([0-9]+) ]]; then
-            MIGRATION_CONFIG_JSON+=",\"limit\":${BASH_REMATCH[1]}"
+        # Начало секции tables
+        if [[ "$line" =~ ^[[:space:]]*tables: ]]; then
+            in_tables_section=true
+            continue
         fi
-    done <<< "$TABLES"
-    if [[ -n "$current_table" ]]; then
-        MIGRATION_CONFIG_JSON+="}"
-    fi
-    MIGRATION_CONFIG_JSON+="]"
 
-    # Роли - grep + ручная сборка JSON
-    ROLES_MODE=$(grep -A5 "roles:" "$CONFIG_FILE" | grep "mode:" | cut -d: -f2 | tr -d ' "')
-
-    ROLES_LIST="["
-    ROLES_SECTION=$(grep -A 20 "roles:" "$CONFIG_FILE")
-
-    current_role=""
-    current_table=""
-    current_permissions=""
-    in_role=0
-    in_privileges=0
-
-    while IFS= read -r line; do
-        # Начало роли
-        if [[ "$line" =~ -\ name:\ \"(.*)\" ]]; then
-            if [[ -n "$current_role" ]]; then
-                ROLES_LIST+="{\"name\":\"$current_role\",\"table_privileges\":[$current_table]}"
-            fi
-            current_role="${BASH_REMATCH[1]}"
-            current_table=""
-            in_role=1
-            in_privileges=0
-
-        # Начало table_privileges
-        elif [[ "$line" =~ table_privileges: ]] && [[ $in_role -eq 1 ]]; then
-            in_privileges=1
-
-        # Таблица в привилегиях
-        elif [[ "$line" =~ -\ table:\ \"(.*)\" ]] && [[ $in_privileges -eq 1 ]]; then
-            if [[ -n "$current_table" ]]; then
-                current_table+=","
-            fi
-            current_table+="{\"table\":\"${BASH_REMATCH[1]}\",\"permissions\":["
-            current_permissions=""
-
-        # Permissions
-        elif [[ "$line" =~ permissions:\ \[(.*)\] ]] && [[ $in_privileges -eq 1 ]]; then
-            perms="${BASH_REMATCH[1]}"
-            # Чистим permissions от кавычек и пробелов
-            perms=$(echo "$perms" | sed 's/\"//g; s/ //g')
-            IFS=',' read -ra perm_array <<< "$perms"
-            for perm in "${perm_array[@]}"; do
-                if [[ -n "$current_permissions" ]]; then
-                    current_permissions+=","
-                fi
-                current_permissions+="\"$perm\""
-            done
-            current_table+="$current_permissions]}"
-            current_permissions=""
-
-        # Конец роли (новая роль или конец секции)
-        elif [[ "$line" =~ ^[^[:space:]] ]] && [[ $in_role -eq 1 ]]; then
-            if [[ -n "$current_role" ]]; then
-                if [[ -n "$ROLES_LIST" ]] && [[ "$ROLES_LIST" != "[" ]]; then
-                    ROLES_LIST+=","
-                fi
-                ROLES_LIST+="{\"name\":\"$current_role\",\"table_privileges\":[$current_table]}"
-            fi
+        # Конец секции tables (новая секция на том же уровне)
+        if [[ "$in_tables_section" == true ]] && [[ "$line" =~ ^[[:space:]]*[a-z_]+: ]] && ! [[ "$line" =~ ^[[:space:]]+- ]]; then
             break
         fi
-    done <<< "$ROLES_SECTION"
 
-    # Добавляем последнюю роль
-    if [[ -n "$current_role" ]]; then
-        if [[ "$ROLES_LIST" != "[" ]]; then
-            ROLES_LIST+=","
+        # Ищем имя таблицы внутри секции tables
+        if [[ "$in_tables_section" == true ]] && [[ "$line" =~ name:[[:space:]]*\"([^\"]+)\" ]]; then
+            table_name="${BASH_REMATCH[1]}"
+            if [ "$first_table" = true ]; then
+                first_table=false
+            else
+                MIGRATION_CONFIG_JSON+=","
+            fi
+            MIGRATION_CONFIG_JSON+="{\"table\":\"$table_name\"}"
         fi
-        ROLES_LIST+="{\"name\":\"$current_role\",\"table_privileges\":[$current_table]}"
-    fi
+    done < "$CONFIG_FILE"
 
-    ROLES_LIST+="]"
+    MIGRATION_CONFIG_JSON+="]"
 
-    # Если не нашли роли, используем пустой массив
-    if [[ "$ROLES_LIST" == "[]" ]] || [[ -z "$ROLES_LIST" ]]; then
-        ROLES_LIST="[]"
-    fi
-    # Если не нашли роли, используем пустой массив
-    if [[ "$ROLES_LIST" == "[" ]] || [[ -z "$ROLES_LIST" ]] || [[ "$ROLES_LIST" == "[]" ]]; then
-        ROLES_LIST="[]"
-    fi
+    # Роли
+    ROLES_MODE=$(grep -A5 "roles:" "$CONFIG_FILE" | grep "mode:" | cut -d: -f2 | tr -d ' "')
 
-    # Если не нашли таблицы, используем пустой массив
-    if [[ "$MIGRATION_CONFIG_JSON" == "[" ]] || [[ -z "$MIGRATION_CONFIG_JSON" ]] || [[ "$MIGRATION_CONFIG_JSON" == "[]" ]]; then
-        MIGRATION_CONFIG_JSON="[]"
+    # Ищем имя роли (только в секции roles)
+    ROLE_NAME=""
+    ROLE_TABLE=""
+    ROLE_PERMISSIONS=""
+
+    in_roles_section=false
+    in_list_section=false
+    in_privileges_section=false
+
+    while IFS= read -r line; do
+        # Начало секции roles
+        if [[ "$line" =~ ^[[:space:]]*roles: ]]; then
+            in_roles_section=true
+            continue
+        fi
+
+        # Выход из секции roles
+        if [[ "$in_roles_section" == true ]] && [[ "$line" =~ ^[[:space:]]*[a-z_]+: ]] && ! [[ "$line" =~ ^[[:space:]]+- ]] && ! [[ "$line" =~ ^[[:space:]]+[a-z_]+: ]]; then
+            break
+        fi
+
+        # В секции roles
+        if [[ "$in_roles_section" == true ]]; then
+            # Секция list
+            if [[ "$line" =~ ^[[:space:]]+list: ]]; then
+                in_list_section=true
+                continue
+            fi
+
+            # Имя роли в list
+            if [[ "$in_list_section" == true ]] && [[ "$line" =~ name:[[:space:]]*\"([^\"]+)\" ]]; then
+                ROLE_NAME="${BASH_REMATCH[1]}"
+                continue
+            fi
+
+            # Секция table_privileges
+            if [[ "$line" =~ ^[[:space:]]+table_privileges: ]]; then
+                in_privileges_section=true
+                continue
+            fi
+
+            # Таблица в privileges
+            if [[ "$in_privileges_section" == true ]] && [[ "$line" =~ table:[[:space:]]*\"([^\"]+)\" ]]; then
+                ROLE_TABLE="${BASH_REMATCH[1]}"
+                continue
+            fi
+
+            # Permissions в privileges
+            if [[ "$in_privileges_section" == true ]] && [[ "$line" =~ permissions:[[:space:]]*\[(.*)\] ]]; then
+                ROLE_PERMISSIONS="${BASH_REMATCH[1]}"
+                # Убираем кавычки и пробелы
+                ROLE_PERMISSIONS=$(echo "$ROLE_PERMISSIONS" | sed 's/\"//g; s/ //g')
+                break
+            fi
+        fi
+    done < "$CONFIG_FILE"
+
+    # Формируем JSON для ролей
+    ROLES_LIST="[]"
+    if [[ -n "$ROLE_NAME" && -n "$ROLE_TABLE" && -n "$ROLE_PERMISSIONS" ]]; then
+        # Преобразуем permissions в массив JSON
+        IFS=',' read -ra PERM_ARRAY <<< "$ROLE_PERMISSIONS"
+        PERMISSIONS_JSON=""
+        first_perm=true
+        for perm in "${PERM_ARRAY[@]}"; do
+            if [ "$first_perm" = true ]; then
+                first_perm=false
+            else
+                PERMISSIONS_JSON+=","
+            fi
+            PERMISSIONS_JSON+="\"$perm\""
+        done
+
+        ROLES_LIST="[{\"name\":\"$ROLE_NAME\",\"table_privileges\":[{\"table\":\"$ROLE_TABLE\",\"permissions\":[$PERMISSIONS_JSON]}]}]"
     fi
 
     echo "[INFO] === КОНФИГУРАЦИЯ ==="
