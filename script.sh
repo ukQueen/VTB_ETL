@@ -22,148 +22,132 @@ main() {
     TARGET_USERNAME=$(grep -A5 "target:" "$CONFIG_FILE" | grep "username:" | cut -d: -f2 | tr -d ' "')
     TARGET_PASSWORD=$(grep -A5 "target:" "$CONFIG_FILE" | grep "password:" | cut -d: -f2 | tr -d ' "')
 
-    DUMP_PATH=$(grep -A3 "dumb:" "$CONFIG_FILE" | grep "path:" | cut -d: -f2- | sed 's/^[ \t]*"//;s/"[ \t]*$//')
-
     THREADS=$(grep "threads:" "$CONFIG_FILE" | head -1 | cut -d: -f2 | tr -d ' "')
-
-    MIGRATION_CONFIG_JSON="["
-    FIRST_TABLE=true
 
     echo "[DEBUG] Начинаем парсинг таблиц..."
 
-    MIGRATION_CONFIG_JSON=$(awk '
-    BEGIN {
-        first = 1
-        print "["
-    }
-    /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
-        if (!first) {
-            printf ",\n"
-        }
-        first = 0
-
-        # Извлекаем имя таблицы
-        gsub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\"|\"[[:space:]]*$/, "")
-        table_name = $0
-        where_condition = ""
-        limit_value = ""
-        orderby_value = ""
-
-        # Читаем следующие строки для условий
-        while (getline > 0) {
-            # Если нашли следующую таблицу, выходим
-            if (/^[[:space:]]*-[[:space:]]*name:/) {
-                # Откатываем одну строку назад для следующей итерации
-                system("exit") # Это не сработает, нужно по-другому
-                break
-            }
-
-            # Парсим where
-            if (/^[[:space:]]*where:[[:space:]]*/) {
-                gsub(/^[[:space:]]*where:[[:space:]]*\"|\"[[:space:]]*$/, "")
-                where_condition = $0
-            }
-
-            # Парсим limit
-            if (/^[[:space:]]*limit:[[:space:]]*/) {
-                gsub(/^[[:space:]]*limit:[[:space:]]*/, "")
-                limit_value = $0
-            }
-
-            # Парсим orderby
-            if (/^[[:space:]]*orderby:[[:space:]]*/) {
-                gsub(/^[[:space:]]*orderby:[[:space:]]*\"|\"[[:space:]]*$/, "")
-                orderby_value = $0
-            }
-
-            # Если пустая строка или конец секции, выходим
-            if (/^[[:space:]]*$/ || /^[^[:space:]]/) {
-                break
-            }
-        }
-
-        # Формируем JSON объект
-        printf "  {\"table\":\"%s\"", table_name
-
-        if (where_condition != "") {
-            gsub(/"/, "\\\"", where_condition)
-            printf ",\"where\":\"%s\"", where_condition
-        }
-
-        if (limit_value != "") {
-            printf ",\"limit\":%s", limit_value
-        }
-
-        if (orderby_value != "") {
-            gsub(/"/, "\\\"", orderby_value)
-            printf ",\"orderby\":\"%s\"", orderby_value
-        }
-
-        printf "}"
-    }
-    END {
-        print "\n]"
-    }
-    ' "$CONFIG_FILE")
-
-    if [[ "$MIGRATION_CONFIG_JSON" == "[" ]] || [[ "$MIGRATION_CONFIG_JSON" == "[]" ]]; then
-        echo "[WARN] Awk метод не сработал, используем альтернативный..."
-
-        MIGRATION_CONFIG_JSON="["
-        FIRST=true
-
-        TABLE_SECTION=$(grep -A10 "tables:" "$CONFIG_FILE")
-
-        while IFS= read -r line; do
-            if [[ "$line" =~ name:[[:space:]]*\"([^\"]+)\" ]]; then
-                if [[ "$FIRST" == "false" ]]; then
-                    MIGRATION_CONFIG_JSON="${MIGRATION_CONFIG_JSON},"
-                fi
-                TABLE_NAME="${BASH_REMATCH[1]}"
-                MIGRATION_CONFIG_JSON="${MIGRATION_CONFIG_JSON}{\"table\":\"$TABLE_NAME\""
-                FIRST="false"
-            elif [[ -n "$TABLE_NAME" ]]; then
-                if [[ "$line" =~ where:[[:space:]]*\"([^\"]+)\" ]]; then
-                    WHERE="${BASH_REMATCH[1]}"
-                    SAFE_WHERE=$(echo "$WHERE" | sed 's/"/\\"/g')
-                    MIGRATION_CONFIG_JSON="${MIGRATION_CONFIG_JSON},\"where\":\"$SAFE_WHERE\""
-                elif [[ "$line" =~ limit:[[:space:]]*([0-9]+) ]]; then
-                    LIMIT="${BASH_REMATCH[1]}"
-                    MIGRATION_CONFIG_JSON="${MIGRATION_CONFIG_JSON},\"limit\":$LIMIT"
-                elif [[ "$line" =~ orderby:[[:space:]]*\"([^\"]+)\" ]]; then
-                    ORDERBY="${BASH_REMATCH[1]}"
-                    SAFE_ORDERBY=$(echo "$ORDERBY" | sed 's/"/\\"/g')
-                    MIGRATION_CONFIG_JSON="${MIGRATION_CONFIG_JSON},\"orderby\":\"$SAFE_ORDERBY\""
-                elif [[ "$line" =~ ^[[:space:]]*-[[:space:]]*name: ]] || [[ "$line" =~ ^[^[:space:]] ]]; then
-                    MIGRATION_CONFIG_JSON="${MIGRATION_CONFIG_JSON}}"
-                    TABLE_NAME=""
-                fi
+    # Таблицы - grep + ручная сборка JSON
+    TABLES=$(grep -A 10 "tables:" "$CONFIG_FILE" | grep -E "name:|where:|limit:" | sed 's/^[ ]*//')
+    MIGRATION_CONFIG_JSON="["
+    current_table=""
+    while IFS= read -r line; do
+        if [[ "$line" =~ name:\ \"(.*)\" ]]; then
+            if [[ -n "$current_table" ]]; then
+                MIGRATION_CONFIG_JSON+="},"
             fi
-        done <<< "$TABLE_SECTION"
-
-        if [[ -n "$TABLE_NAME" ]]; then
-            MIGRATION_CONFIG_JSON="${MIGRATION_CONFIG_JSON}}"
+            current_table="${BASH_REMATCH[1]}"
+            MIGRATION_CONFIG_JSON+="{\"table\":\"$current_table\""
+        elif [[ "$line" =~ where:\ \"(.*)\" ]]; then
+            MIGRATION_CONFIG_JSON+=",\"where\":\"${BASH_REMATCH[1]}\""
+        elif [[ "$line" =~ limit:\ ([0-9]+) ]]; then
+            MIGRATION_CONFIG_JSON+=",\"limit\":${BASH_REMATCH[1]}"
         fi
-        MIGRATION_CONFIG_JSON="${MIGRATION_CONFIG_JSON}]"
+    done <<< "$TABLES"
+    if [[ -n "$current_table" ]]; then
+        MIGRATION_CONFIG_JSON+="}"
+    fi
+    MIGRATION_CONFIG_JSON+="]"
+
+    # Роли - grep + ручная сборка JSON
+    ROLES_MODE=$(grep -A5 "roles:" "$CONFIG_FILE" | grep "mode:" | cut -d: -f2 | tr -d ' "')
+
+    ROLES_LIST="["
+    ROLES_SECTION=$(grep -A 20 "roles:" "$CONFIG_FILE")
+
+    current_role=""
+    current_table=""
+    current_permissions=""
+    in_role=0
+    in_privileges=0
+
+    while IFS= read -r line; do
+        # Начало роли
+        if [[ "$line" =~ -\ name:\ \"(.*)\" ]]; then
+            if [[ -n "$current_role" ]]; then
+                ROLES_LIST+="{\"name\":\"$current_role\",\"table_privileges\":[$current_table]}"
+            fi
+            current_role="${BASH_REMATCH[1]}"
+            current_table=""
+            in_role=1
+            in_privileges=0
+
+        # Начало table_privileges
+        elif [[ "$line" =~ table_privileges: ]] && [[ $in_role -eq 1 ]]; then
+            in_privileges=1
+
+        # Таблица в привилегиях
+        elif [[ "$line" =~ -\ table:\ \"(.*)\" ]] && [[ $in_privileges -eq 1 ]]; then
+            if [[ -n "$current_table" ]]; then
+                current_table+=","
+            fi
+            current_table+="{\"table\":\"${BASH_REMATCH[1]}\",\"permissions\":["
+            current_permissions=""
+
+        # Permissions
+        elif [[ "$line" =~ permissions:\ \[(.*)\] ]] && [[ $in_privileges -eq 1 ]]; then
+            perms="${BASH_REMATCH[1]}"
+            # Чистим permissions от кавычек и пробелов
+            perms=$(echo "$perms" | sed 's/\"//g; s/ //g')
+            IFS=',' read -ra perm_array <<< "$perms"
+            for perm in "${perm_array[@]}"; do
+                if [[ -n "$current_permissions" ]]; then
+                    current_permissions+=","
+                fi
+                current_permissions+="\"$perm\""
+            done
+            current_table+="$current_permissions]}"
+            current_permissions=""
+
+        # Конец роли (новая роль или конец секции)
+        elif [[ "$line" =~ ^[^[:space:]] ]] && [[ $in_role -eq 1 ]]; then
+            if [[ -n "$current_role" ]]; then
+                if [[ -n "$ROLES_LIST" ]] && [[ "$ROLES_LIST" != "[" ]]; then
+                    ROLES_LIST+=","
+                fi
+                ROLES_LIST+="{\"name\":\"$current_role\",\"table_privileges\":[$current_table]}"
+            fi
+            break
+        fi
+    done <<< "$ROLES_SECTION"
+
+    # Добавляем последнюю роль
+    if [[ -n "$current_role" ]]; then
+        if [[ "$ROLES_LIST" != "[" ]]; then
+            ROLES_LIST+=","
+        fi
+        ROLES_LIST+="{\"name\":\"$current_role\",\"table_privileges\":[$current_table]}"
     fi
 
-    if [[ "$MIGRATION_CONFIG_JSON" == "[" ]]; then
+    ROLES_LIST+="]"
+
+    # Если не нашли роли, используем пустой массив
+    if [[ "$ROLES_LIST" == "[]" ]] || [[ -z "$ROLES_LIST" ]]; then
+        ROLES_LIST="[]"
+    fi
+    # Если не нашли роли, используем пустой массив
+    if [[ "$ROLES_LIST" == "[" ]] || [[ -z "$ROLES_LIST" ]] || [[ "$ROLES_LIST" == "[]" ]]; then
+        ROLES_LIST="[]"
+    fi
+
+    # Если не нашли таблицы, используем пустой массив
+    if [[ "$MIGRATION_CONFIG_JSON" == "[" ]] || [[ -z "$MIGRATION_CONFIG_JSON" ]] || [[ "$MIGRATION_CONFIG_JSON" == "[]" ]]; then
         MIGRATION_CONFIG_JSON="[]"
     fi
 
     echo "[INFO] === КОНФИГУРАЦИЯ ==="
     echo "[INFO] Исходная БД: $SOURCE_HOST:$SOURCE_PORT/$SOURCE_DATABASE"
     echo "[INFO] Целевая БД: $TARGET_HOST:$TARGET_PORT/$TARGET_DATABASE"
-    echo "[INFO] Dump path: $DUMP_PATH"
     echo "[INFO] Потоков: $THREADS"
     echo "[INFO] Конфиг таблиц: $MIGRATION_CONFIG_JSON"
+    echo "[INFO] Режим ролей: $ROLES_MODE"
+    echo "[INFO] Список ролей: $ROLES_LIST"
     echo "[INFO] ====================="
 
     echo "[INFO] Запускаем Go приложение..."
 
     echo "[INFO] Собираем Docker образ..."
     if docker build -t go-migrator .; then
-        echo "[INFO] Запускаем контейнер (логи из Go будут видны ниже)..."
+        echo "[INFO] Запускаем контейнер..."
 
         docker run --rm \
             -e "SOURCE_DB_HOST=$SOURCE_HOST" \
@@ -176,9 +160,10 @@ main() {
             -e "TARGET_DB_NAME=$TARGET_DATABASE" \
             -e "TARGET_DB_USERNAME=$TARGET_USERNAME" \
             -e "TARGET_DB_PASSWORD=$TARGET_PASSWORD" \
-            -e "DUMP_FILE=$DUMP_PATH" \
             -e "MIGRATION_THREADS=$THREADS" \
             -e "MIGRATION_CONFIG_JSON=$MIGRATION_CONFIG_JSON" \
+            -e "ROLES_MODE=$ROLES_MODE" \
+            -e "ROLES_LIST=$ROLES_LIST" \
             go-migrator
 
         if [ $? -eq 0 ]; then

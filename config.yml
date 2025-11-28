@@ -22,3 +22,14 @@ migration:
       limit: 50
     - name: "departments"
       where: "department_id = 10"
+
+  roles:
+    mode: "include"
+    list:
+      - name: "userrrr"
+        table_privileges:
+          - table: "universities"
+            permissions: [ "SELECT", "INSERT", "UPDATE", "DELETE" ]
+
+
+
